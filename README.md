@@ -25,6 +25,23 @@
 | **前端** | React 18 + Vite + TDesign + PWA |
 | **数据库** | SQLite（better-sqlite3） |
 
+## 🤖 一键部署（直接发给你的 AI Agent）
+
+把这个项目部署起来，最简单的方式：把下面整段指令发给你的 AI Agent（WorkBuddy / Cursor / Claude Code 等），它会自动完成克隆、装依赖、启动。
+
+> 前提：电脑已安装 **Node.js 18+**，并准备一个 **DeepSeek API Key**（[免费获取](https://platform.deepseek.com/api_keys)，费用自理）。
+
+```
+请帮我部署这个项目：
+1. git clone https://github.com/Chendusikao/rent-contract-ai-assistant
+2. cd rent-contract-ai-assistant && npm install
+3. npm run dev
+4. 打开 http://localhost:5173，在"设置"页填入我的 DeepSeek API Key 并点"验证并保存"
+5. 首次启动会自动下载向量模型（约 90MB）和 OCR 语言包，等待完成即可使用
+```
+
+> 没有 AI Agent？按下方 [快速开始](#-快速开始下载后-5-步上手) 手动操作，步骤完全一样。
+
 ## 🚀 快速开始（下载后 5 步上手）
 
 > 环境要求：**Node.js 18+**（推荐 20+）、npm。其他自动安装，无需手动配置。
