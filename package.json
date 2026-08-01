@@ -4,12 +4,12 @@
   "type": "module",
   "scripts": {
     "dev": "concurrently \"npm run dev:server\" \"npm run dev:client\"",
-    "dev:server": "tsx watch --env-file=.env server/index.ts",
+    "dev:server": "tsx watch server/index.ts",
     "dev:client": "vite",
     "build": "vite build",
     "build:check": "tsc -b",
     "preview": "vite preview",
-    "server": "tsx --env-file=.env server/index.ts"
+    "server": "tsx server/index.ts"
   },
   "dependencies": {
     "@langchain/core": "^1.2.4",

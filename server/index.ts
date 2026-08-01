@@ -5,6 +5,10 @@ import path from "path";
 import fs from "fs";
 import { fileURLToPath } from "url";
 import OpenAI from "openai";
+import { loadEnvFile } from "./env.js";
+
+// 安全加载 .env（不存在时不报错，API Key 可在网页设置页配置）
+loadEnvFile();
 import * as db from "./db.js";
 import { installLogCapture, getLogs, clearLogs, type LogLevel } from "./logger.js";
 import {
