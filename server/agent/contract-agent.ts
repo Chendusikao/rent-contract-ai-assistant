@@ -107,7 +107,15 @@ async function retrieveLawNode(state: ContractStateT): Promise<Partial<ContractS
   const lawChunks = await searchLawKnowledgeBase(state.question, 3);
   if (lawChunks.length === 0) return {};
   return {
-    sources: [...(state.sources || []), ...lawChunks.map(c => c.text.split('\n')[0].replace(/^【|】$/g, ''))],
+    sources: [
+      ...(state.sources || []),
+      ...lawChunks.map(c => {
+        const label = c.text.split('\n')[0].replace(/^【|】$/g, '');
+        // 从 chunk 文本反查知识条目 id（反馈统计用）
+        const kbId = lawChunks.find(x => x.index === c.index)?.kbId || null;
+        return kbId ? `${label}::${kbId}` : label;
+      }),
+    ],
   };
 }
 

@@ -24,6 +24,20 @@ function getDb(): Database.Database {
         text TEXT
       );
       CREATE INDEX IF NOT EXISTS idx_plain_chunks_contract ON plain_chunks(contract_id);
+
+      -- 知识条目（可进化的法规/常识库，网页可管理）
+      CREATE TABLE IF NOT EXISTS knowledge_items (
+        id TEXT PRIMARY KEY,
+        title TEXT NOT NULL,
+        content TEXT NOT NULL,
+        enabled INTEGER DEFAULT 1,
+        hit_count INTEGER DEFAULT 0,
+        helpful_count INTEGER DEFAULT 0,
+        not_helpful_count INTEGER DEFAULT 0,
+        created_at TEXT DEFAULT (datetime('now')),
+        updated_at TEXT DEFAULT (datetime('now'))
+      );
+      CREATE INDEX IF NOT EXISTS idx_knowledge_items_enabled ON knowledge_items(enabled);
     `);
   }
   return dbInstance;
@@ -196,6 +210,7 @@ export interface RetrievedChunk {
   index: number;
   text: string;
   score: number;
+  kbId?: string;  // 知识条目 id（来自 knowledge_items，反馈统计用）
 }
 
 /**
@@ -253,7 +268,7 @@ export async function searchContractChunks(
 }
 
 /**
- * 检索全局法规知识库
+ * 检索全局法规知识库（混合检索：语义向量 + BM25 关键词加权）
  */
 export async function searchLawKnowledgeBase(query: string, topK = 3): Promise<RetrievedChunk[]> {
   const db = getDb();
@@ -261,6 +276,8 @@ export async function searchLawKnowledgeBase(query: string, topK = 3): Promise<R
     .all() as { chunk_id: string; chunk_index: number; text: string }[];
 
   if (rows.length === 0) return [];
+
+  let semanticResults: RetrievedChunk[] | null = null;
 
   // 语义检索（sqlite-vec 向量距离查询）
   try {
@@ -272,16 +289,15 @@ export async function searchLawKnowledgeBase(query: string, topK = 3): Promise<R
         SELECT chunk_id, chunk_index, text, vec_distance_cosine(embedding, ?) AS distance
         FROM vec_chunks WHERE contract_id = '__LAW_KB__'
         ORDER BY distance ASC LIMIT ?
-      `).all(JSON.stringify(queryVec), topK) as { chunk_id: string; chunk_index: number; text: string; distance: number }[];
+      `).all(JSON.stringify(queryVec), Math.max(topK * 3, 10)) as { chunk_id: string; chunk_index: number; text: string; distance: number }[];
 
       if (vecRows.length > 0) {
-        const results = vecRows.map(row => ({
+        semanticResults = vecRows.map(row => ({
           contractId: '__LAW_KB__',
           index: row.chunk_index,
           text: row.text,
           score: 1 - row.distance,
         }));
-        return results.filter(r => r.score > 0.35);
       }
     } finally {
       vecDb.close();
@@ -290,20 +306,118 @@ export async function searchLawKnowledgeBase(query: string, topK = 3): Promise<R
     console.error('[Vector] 法规库语义检索失败，降级关键词检索:', e?.message);
   }
 
-  return tfidfSearch(rows, query, topK).map(r => ({
-    contractId: '__LAW_KB__',
-    index: r.chunk_index,
-    text: r.text,
-    score: r.score,
-  }));
+  // BM25 关键词检索（独立于语义）
+  const keywordResults = tfidfSearch(rows, query, topK * 3);
+
+  // 混合融合：语义 + 关键词加权合并（RRF 风格）
+  const merged = fuseResults(semanticResults || [], keywordResults, topK);
+
+  // 附加知识条目 id（chunk_id 形如 law:xxx 或 law:seed-N 或 law:mig-xxx）
+  if (merged.length > 0) {
+    try {
+      const chunkRows = db.prepare(`
+        SELECT chunk_id, chunk_index FROM plain_chunks WHERE contract_id = '__LAW_KB__' AND chunk_index IN (${merged.map(() => '?').join(',')})
+      `).all(...merged.map(m => m.index)) as { chunk_id: string; chunk_index: number }[];
+      const idByIndex = new Map(chunkRows.map(r => [r.chunk_index, r.chunk_id.replace(/^law:/, '')]));
+      for (const m of merged) {
+        m.kbId = idByIndex.get(m.index) || undefined;
+      }
+    } catch { /* 附加失败不影响检索 */ }
+  }
+
+  // 记录命中（用于知识库统计，按 kbId 精确匹配）
+  if (merged.length > 0) {
+    try {
+      const kbIds = merged.map(m => m.kbId).filter(Boolean);
+      if (kbIds.length > 0) {
+        const placeholders = kbIds.map(() => '?').join(',');
+        db.prepare(`UPDATE knowledge_items SET hit_count = hit_count + 1, updated_at = datetime('now') WHERE id IN (${placeholders})`).run(...kbIds);
+      }
+    } catch { /* 统计失败不影响检索 */ }
+  }
+
+  return merged;
+}
+
+/**
+ * RRF 风格混合融合：语义结果 + 关键词结果按排名加权合并
+ */
+function fuseResults(
+  semantic: RetrievedChunk[],
+  keyword: { chunk_index: number; text: string; score: number }[],
+  topK: number
+): RetrievedChunk[] {
+  const scoreMap = new Map<number, { text: string; score: number }>();
+
+  // 语义：排名贡献（1 / (60 + rank)）
+  semantic.forEach((r, i) => {
+    const rank = i + 1;
+    const s = 1 / (60 + rank);
+    const existing = scoreMap.get(r.index);
+    if (existing) {
+      existing.score += s;
+      // 保留更高分
+      if (r.score > s) existing.score += r.score * 0.3;
+    } else {
+      scoreMap.set(r.index, { text: r.text, score: s });
+    }
+  });
+
+  // 关键词：排名贡献 + 原始分数加权
+  keyword.forEach((r, i) => {
+    const rank = i + 1;
+    const s = 1 / (60 + rank) + r.score * 0.5;
+    const existing = scoreMap.get(r.chunk_index);
+    if (existing) {
+      existing.score += s;
+    } else {
+      scoreMap.set(r.chunk_index, { text: r.text, score: s });
+    }
+  });
+
+  return [...scoreMap.entries()]
+    .sort((a, b) => b[1].score - a[1].score)
+    .slice(0, topK)
+    .map(([index, v]) => ({
+      contractId: '__LAW_KB__',
+      index,
+      text: v.text,
+      score: Math.min(1, v.score),
+    }));
 }
 
 /**
  * 初始化法规知识库（幂等）
+ * 种子同时写入 knowledge_items（管理页可见）+ plain_chunks（检索用）
  */
 export async function seedLawKnowledgeBase(entries: { title: string; content: string }[]): Promise<void> {
   const db = getDb();
   const existing = db.prepare("SELECT COUNT(*) as c FROM plain_chunks WHERE contract_id = '__LAW_KB__'").get() as { c: number };
+
+  // 旧格式迁移：已有 plain_chunks 但 knowledge_items 为空 → 从 plain_chunks 恢复
+  const itemCount = (db.prepare('SELECT COUNT(*) as c FROM knowledge_items').get() as { c: number }).c;
+  if (itemCount === 0 && existing.c > 0) {
+    console.log(`[Vector] 检测到旧版知识库（${existing.c} 条），迁移到 knowledge_items...`);
+    const oldRows = db.prepare("SELECT chunk_id, chunk_index, text FROM plain_chunks WHERE contract_id = '__LAW_KB__'").all() as { chunk_id: string; chunk_index: number; text: string }[];
+    const tx = db.transaction(() => {
+      for (const row of oldRows) {
+        const match = row.text.match(/^【(.+?)】/);
+        const title = match ? match[1] : `知识条目 ${row.chunk_index + 1}`;
+        const content = match ? row.text.slice(match[0].length) : row.text;
+        const kbId = `mig-${row.chunk_index}`;
+        db.prepare(`
+          INSERT OR IGNORE INTO knowledge_items (id, title, content, enabled, created_at, updated_at)
+          VALUES (?, ?, ?, 1, datetime('now'), datetime('now'))
+        `).run(kbId, title, content);
+        // 重写 chunk_id 为 law:{kbId}，与 knowledge_items 对齐
+        db.prepare("UPDATE plain_chunks SET chunk_id = ? WHERE chunk_id = ?").run(`law:${kbId}`, row.chunk_id);
+      }
+    });
+    tx();
+    console.log(`[Vector] 旧版知识库迁移完成`);
+    return;
+  }
+
   if (existing.c > 0) {
     console.log(`[Vector] 法规知识库已存在 ${existing.c} 条，跳过初始化`);
     return;
@@ -325,9 +439,17 @@ export async function seedLawKnowledgeBase(entries: { title: string; content: st
     INSERT INTO plain_chunks (chunk_id, contract_id, chunk_index, text)
     VALUES (?, ?, ?, ?)
   `);
+  const insertItemStmt = db.prepare(`
+    INSERT INTO knowledge_items (id, title, content, enabled, created_at, updated_at)
+    VALUES (?, ?, ?, 1, datetime('now'), datetime('now'))
+  `);
   const tx = db.transaction(() => {
     chunks.forEach((text, i) => {
-      insertStmt.run(`law:${i}`, '__LAW_KB__', i, text);
+      insertStmt.run(`law:seed-${i}`, '__LAW_KB__', i, text);
+    });
+    // 种子条目写入 knowledge_items（供管理页展示）
+    entries.forEach((e, i) => {
+      insertItemStmt.run(`seed-${i}`, e.title, e.content);
     });
   });
   tx();
@@ -349,7 +471,7 @@ export async function seedLawKnowledgeBase(entries: { title: string; content: st
         `);
         const ins = vecDb.prepare('INSERT INTO vec_chunks (chunk_id, contract_id, chunk_index, text, embedding) VALUES (?, ?, ?, ?, ?)');
         const tx2 = vecDb.transaction(() => {
-          chunks.forEach((t, i) => ins.run(`law:${i}`, '__LAW_KB__', i, t, JSON.stringify(vectors[i])));
+          chunks.forEach((t, i) => ins.run(`law:seed-${i}`, '__LAW_KB__', i, t, JSON.stringify(vectors[i])));
         });
         tx2();
         console.log(`[Vector] 法规知识库向量化完成: ${chunks.length} 条`);
@@ -360,4 +482,160 @@ export async function seedLawKnowledgeBase(entries: { title: string; content: st
     .catch(e => console.error('[Vector] 法规库向量化失败（继续使用关键词检索）:', e?.message));
 
   console.log(`[Vector] 法规知识库初始化完成，共 ${chunks.length} 条（语义向量模式）`);
+}
+
+// ============= 知识条目管理（可进化 RAG） =============
+
+export interface KnowledgeItem {
+  id: string;
+  title: string;
+  content: string;
+  enabled: number;
+  hit_count: number;
+  helpful_count: number;
+  not_helpful_count: number;
+  created_at: string;
+  updated_at: string;
+}
+
+/**
+ * 将知识条目内容转成检索用文本块（带标题前缀）
+ */
+function knowledgeToChunk(item: { title: string; content: string }): string {
+  const title = `【${item.title}】`;
+  return title + item.content;
+}
+
+/**
+ * 插入一条知识（同步写 plain_chunks，异步向量化）
+ */
+export async function addKnowledgeItem(item: { id: string; title: string; content: string }): Promise<void> {
+  const db = getDb();
+  const text = knowledgeToChunk(item);
+  const now = new Date().toISOString();
+
+  db.prepare(`
+    INSERT INTO knowledge_items (id, title, content, enabled, created_at, updated_at)
+    VALUES (?, ?, ?, 1, ?, ?)
+  `).run(item.id, item.title, item.content, now, now);
+
+  // 写检索索引（chunk_index 用自增序号）
+  const maxIdx = db.prepare("SELECT COALESCE(MAX(chunk_index), -1) as m FROM plain_chunks WHERE contract_id = '__LAW_KB__'").get() as { m: number };
+  db.prepare(`
+    INSERT INTO plain_chunks (chunk_id, contract_id, chunk_index, text)
+    VALUES (?, '__LAW_KB__', ?, ?)
+  `).run(`law:${item.id}`, maxIdx.m + 1, text);
+
+  // 向量化
+  embedTexts([text]).then(vectors => {
+    const vecDb = new Database(DB_PATH);
+    sqliteVec.load(vecDb);
+    try {
+      vecDb.exec(`
+        CREATE VIRTUAL TABLE IF NOT EXISTS vec_chunks USING vec0(
+          chunk_id TEXT PRIMARY KEY,
+          contract_id TEXT,
+          chunk_index FLOAT,
+          text TEXT,
+          embedding float[${EMBEDDING_DIM}]
+        );
+      `);
+      vecDb.prepare('INSERT INTO vec_chunks (chunk_id, contract_id, chunk_index, text, embedding) VALUES (?, ?, ?, ?, ?)')
+        .run(`law:${item.id}`, '__LAW_KB__', maxIdx.m + 1, text, JSON.stringify(vectors[0]));
+    } finally {
+      vecDb.close();
+    }
+  }).catch(e => console.error('[Vector] 新增知识向量化失败:', e?.message));
+
+  console.log(`[Vector] 已添加知识条目: ${item.title}`);
+}
+
+/**
+ * 更新知识条目（重新向量化）
+ */
+export async function updateKnowledgeItem(id: string, updates: { title?: string; content?: string; enabled?: boolean }): Promise<boolean> {
+  const db = getDb();
+  const existing = db.prepare('SELECT * FROM knowledge_items WHERE id = ?').get(id) as KnowledgeItem | undefined;
+  if (!existing) return false;
+
+  const title = updates.title ?? existing.title;
+  const content = updates.content ?? existing.content;
+  const enabled = updates.enabled !== undefined ? (updates.enabled ? 1 : 0) : existing.enabled;
+  const text = knowledgeToChunk({ title, content });
+
+  db.prepare(`
+    UPDATE knowledge_items SET title = ?, content = ?, enabled = ?, updated_at = datetime('now')
+    WHERE id = ?
+  `).run(title, content, enabled, id);
+
+  // 更新检索索引
+  db.prepare("DELETE FROM plain_chunks WHERE chunk_id = ?").run(`law:${id}`);
+  if (enabled) {
+    db.prepare(`
+      INSERT INTO plain_chunks (chunk_id, contract_id, chunk_index, text)
+      VALUES (?, '__LAW_KB__', ?, ?)
+    `).run(`law:${id}`, existing.chunk_index ?? 0, text);
+  }
+
+  // 重新向量化
+  const vecDb = new Database(DB_PATH);
+  sqliteVec.load(vecDb);
+  try {
+    vecDb.prepare('DELETE FROM vec_chunks WHERE chunk_id = ?').run(`law:${id}`);
+    if (enabled) {
+      const [vec] = await embedTexts([text]);
+      vecDb.prepare('INSERT INTO vec_chunks (chunk_id, contract_id, chunk_index, text, embedding) VALUES (?, ?, ?, ?, ?)')
+        .run(`law:${id}`, '__LAW_KB__', existing.chunk_index ?? 0, text, JSON.stringify(vec));
+    }
+  } finally {
+    vecDb.close();
+  }
+
+  console.log(`[Vector] 已更新知识条目: ${title} (enabled=${enabled})`);
+  return true;
+}
+
+/**
+ * 删除知识条目（软删除：enabled=0，保留统计）
+ */
+export async function deleteKnowledgeItem(id: string): Promise<boolean> {
+  return updateKnowledgeItem(id, { enabled: false });
+}
+
+/**
+ * 记录知识反馈（帮助/不帮助）
+ */
+export function recordKnowledgeFeedback(id: string, helpful: boolean): void {
+  const db = getDb();
+  const field = helpful ? 'helpful_count' : 'not_helpful_count';
+  db.prepare(`UPDATE knowledge_items SET ${field} = ${field} + 1, updated_at = datetime('now') WHERE id = ?`).run(id);
+}
+
+/**
+ * 知识条目列表（按命中数/帮助率排序）
+ */
+export function listKnowledgeItems(): KnowledgeItem[] {
+  const db = getDb();
+  return db.prepare('SELECT * FROM knowledge_items ORDER BY enabled DESC, hit_count DESC, created_at DESC')
+    .all() as KnowledgeItem[];
+}
+
+/**
+ * 知识库统计
+ */
+export function getKnowledgeStats(): { total: number; enabled: number; totalHits: number; totalHelpful: number; helpfulRate: number } {
+  const db = getDb();
+  const total = (db.prepare('SELECT COUNT(*) as c FROM knowledge_items').get() as { c: number }).c;
+  const enabled = (db.prepare('SELECT COUNT(*) as c FROM knowledge_items WHERE enabled = 1').get() as { c: number }).c;
+  const totalHits = (db.prepare('SELECT COALESCE(SUM(hit_count),0) as s FROM knowledge_items').get() as { s: number }).s;
+  const totalHelpful = (db.prepare('SELECT COALESCE(SUM(helpful_count),0) as s FROM knowledge_items').get() as { s: number }).s;
+  const totalNotHelpful = (db.prepare('SELECT COALESCE(SUM(not_helpful_count),0) as s FROM knowledge_items').get() as { s: number }).s;
+  const feedbackTotal = totalHelpful + totalNotHelpful;
+  return {
+    total,
+    enabled,
+    totalHits,
+    totalHelpful,
+    helpfulRate: feedbackTotal > 0 ? totalHelpful / feedbackTotal : 0,
+  };
 }

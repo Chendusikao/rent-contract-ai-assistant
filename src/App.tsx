@@ -10,6 +10,7 @@ import { Header } from './components/Header';
 import { SettingsPage } from './components/SettingsPage';
 import { ContractPage } from './pages/ContractPage';
 import { AdminPage } from './pages/AdminPage';
+import { KnowledgePage } from './pages/KnowledgePage';
 import { APP_CONFIG } from './config';
 
 function App() {
@@ -19,6 +20,7 @@ function App() {
       <Route path="/contract/:contractId" element={<AppContent />} />
       <Route path="/settings" element={<AppContent />} />
       <Route path="/admin" element={<AppContent />} />
+      <Route path="/knowledge" element={<AppContent />} />
     </Routes>
   );
 }
@@ -28,6 +30,7 @@ function AppContent() {
   const location = useLocation();
   const isSettingsPage = location.pathname === '/settings';
   const isAdminPage = location.pathname === '/admin';
+  const isKnowledgePage = location.pathname === '/knowledge';
   const isContractDetail = location.pathname.startsWith('/contract/');
 
   // Hooks
@@ -37,6 +40,7 @@ function AppContent() {
   // 页面标题（侧边栏/顶栏展示）
   const getPageTitle = () => {
     if (isAdminPage) return '分析记录';
+    if (isKnowledgePage) return '知识库';
     if (isSettingsPage) return '设置';
     if (isContractDetail) return '分析报告';
     return APP_CONFIG.name;
@@ -53,6 +57,10 @@ function AppContent() {
   };
   const handleOpenAdmin = () => {
     navigate('/admin');
+    setSidebarOpen(false);
+  };
+  const handleOpenKnowledge = () => {
+    navigate('/knowledge');
     setSidebarOpen(false);
   };
 
@@ -90,10 +98,12 @@ function AppContent() {
         <Sidebar
           isSettingsPage={isSettingsPage}
           isAdminPage={isAdminPage}
+          isKnowledgePage={isKnowledgePage}
           sidebarOpen={isMobile ? true : sidebarOpen}
           onHome={handleHome}
           onOpenSettings={handleOpenSettings}
           onOpenAdmin={handleOpenAdmin}
+          onOpenKnowledge={handleOpenKnowledge}
         />
       </div>
 
@@ -116,6 +126,8 @@ function AppContent() {
         {/* 页面 */}
         {isAdminPage ? (
           <AdminPage />
+        ) : isKnowledgePage ? (
+          <KnowledgePage />
         ) : isSettingsPage ? (
           <SettingsPage />
         ) : (

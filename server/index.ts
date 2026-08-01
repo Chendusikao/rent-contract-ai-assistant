@@ -37,6 +37,12 @@ import { runContractAgent, resetLlm } from "./agent/contract-agent.js";
 import {
   indexContract,
   seedLawKnowledgeBase,
+  addKnowledgeItem,
+  updateKnowledgeItem,
+  deleteKnowledgeItem,
+  recordKnowledgeFeedback,
+  listKnowledgeItems,
+  getKnowledgeStats,
 } from "./rag/vector-store.js";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -335,9 +341,14 @@ app.post("/api/contracts/:contractId/follow-up", async (req, res) => {
 
     console.log(`[Agent] 追问完成，引用来源: ${output.sources.join(', ') || '无'}`);
 
+    // 从 sources 解析知识条目 id（格式 "标题::kbId"）
+    const kbIds = output.sources
+      .map(s => s.split('::')[1])
+      .filter(Boolean);
+
     // 将完整回答一次性发出（保留 text 事件兼容前端流式渲染）
     res.write(`data: ${JSON.stringify({ type: "text", content: output.answer })}\n\n`);
-    res.write(`data: ${JSON.stringify({ type: "done" })}\n\n`);
+    res.write(`data: ${JSON.stringify({ type: "done", kbIds })}\n\n`);
     res.end();
   } catch (error: any) {
     console.error("[FollowUp] 错误:", error?.message);
@@ -353,6 +364,84 @@ app.get("/api/contracts", (req, res) => {
     res.json({ contracts });
   } catch (error: any) {
     res.status(500).json({ error: error?.message || "获取合同记录失败" });
+  }
+});
+
+// ============= 知识库管理（可进化 RAG） =============
+
+// 知识条目列表 + 统计
+app.get("/api/knowledge", (req, res) => {
+  try {
+    const items = listKnowledgeItems();
+    const stats = getKnowledgeStats();
+    res.json({ items, stats });
+  } catch (error: any) {
+    res.status(500).json({ error: error?.message || "获取知识库失败" });
+  }
+});
+
+// 新增知识条目
+app.post("/api/knowledge", async (req, res) => {
+  const { title, content } = req.body;
+  if (!title?.trim() || !content?.trim()) {
+    return res.status(400).json({ error: "标题和内容不能为空" });
+  }
+  try {
+    const id = uuidv4();
+    await addKnowledgeItem({ id, title: title.trim(), content: content.trim() });
+    res.json({ success: true, id });
+  } catch (error: any) {
+    res.status(500).json({ error: error?.message || "新增知识失败" });
+  }
+});
+
+// 更新知识条目
+app.put("/api/knowledge/:id", async (req, res) => {
+  const { title, content, enabled } = req.body;
+  try {
+    const ok = await updateKnowledgeItem(req.params.id, {
+      title: title?.trim(),
+      content: content?.trim(),
+      enabled: enabled !== undefined ? !!enabled : undefined,
+    });
+    if (!ok) return res.status(404).json({ error: "知识条目不存在" });
+    res.json({ success: true });
+  } catch (error: any) {
+    res.status(500).json({ error: error?.message || "更新知识失败" });
+  }
+});
+
+// 删除知识条目（软删除）
+app.delete("/api/knowledge/:id", async (req, res) => {
+  try {
+    const ok = await deleteKnowledgeItem(req.params.id);
+    if (!ok) return res.status(404).json({ error: "知识条目不存在" });
+    res.json({ success: true });
+  } catch (error: any) {
+    res.status(500).json({ error: error?.message || "删除知识失败" });
+  }
+});
+
+// 反馈：这条知识回答是否有帮助
+app.post("/api/knowledge/feedback", (req, res) => {
+  const { id, helpful } = req.body;
+  if (!id || typeof helpful !== 'boolean') {
+    return res.status(400).json({ error: "参数错误" });
+  }
+  try {
+    recordKnowledgeFeedback(id, helpful);
+    res.json({ success: true });
+  } catch (error: any) {
+    res.status(500).json({ error: error?.message || "反馈失败" });
+  }
+});
+
+// 知识库统计
+app.get("/api/knowledge/stats", (req, res) => {
+  try {
+    res.json(getKnowledgeStats());
+  } catch (error: any) {
+    res.status(500).json({ error: error?.message || "获取统计失败" });
   }
 });
 

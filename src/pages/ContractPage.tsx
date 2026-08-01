@@ -30,6 +30,8 @@ interface ContractAnalysis {
 interface FollowUpMessage {
   role: 'user' | 'assistant';
   content: string;
+  kbIds?: string[];
+  feedback?: 'helpful' | 'not_helpful' | null;
 }
 
 // 风险等级颜色
@@ -238,6 +240,16 @@ export function ContractPage() {
                 });
               } else if (msg.type === 'error') {
                 MessagePlugin.error(msg.message || '追问失败');
+              } else if (msg.type === 'done' && msg.kbIds) {
+                // 把知识条目 id 挂到最后一条 assistant 消息（反馈用）
+                setFollowUpHistory(prev => {
+                  const next = [...prev];
+                  const last = next[next.length - 1];
+                  if (last?.role === 'assistant') {
+                    next[next.length - 1] = { ...last, kbIds: msg.kbIds, feedback: null };
+                  }
+                  return next;
+                });
               }
             } catch { /* ignore */ }
           }
@@ -259,6 +271,30 @@ export function ContractPage() {
       MessagePlugin.success('协商话术已复制');
     });
   };
+
+  // 提交知识反馈（👍👎 帮助系统优化知识库）
+  const submitFeedback = useCallback(async (index: number, helpful: boolean) => {
+    setFollowUpHistory(prev => {
+      const next = [...prev];
+      const msg = next[index];
+      if (msg?.role !== 'assistant' || !msg.kbIds?.length || msg.feedback) return prev;
+      next[index] = { ...msg, feedback: helpful ? 'helpful' : 'not_helpful' };
+      // 异步上报，不阻塞 UI
+      for (const kbId of msg.kbIds) {
+        fetch(api('/api/knowledge/feedback'), {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ id: kbId, helpful }),
+        }).catch(() => {});
+      }
+      if (helpful) {
+        MessagePlugin.success('感谢反馈，这条知识将获得更高权重');
+      } else {
+        MessagePlugin.info('已记录，我们会优化这条知识的回答');
+      }
+      return next;
+    });
+  }, []);
 
   const [exporting, setExporting] = useState(false);
   const reportRef = useRef<HTMLDivElement>(null);
@@ -719,6 +755,36 @@ export function ContractPage() {
                       <span className="ml-0.5 inline-block w-2 h-4 align-middle" style={{ backgroundColor: 'var(--td-brand-color)' }}>
                         <span className="animate-pulse">|</span>
                       </span>
+                    )}
+                    {/* 知识反馈（👍👎 帮助优化知识库） */}
+                    {msg.role === 'assistant' && !followingUp && msg.kbIds && msg.kbIds.length > 0 && (
+                      <div className="flex items-center gap-1 mt-2 pt-2" style={{ borderTop: '1px dashed var(--td-component-border)' }}>
+                        <span className="text-xs mr-1" style={{ color: 'var(--td-text-color-placeholder)' }}>这个回答有帮助吗</span>
+                        <button
+                          className="text-sm px-1.5 py-0.5 rounded transition-colors"
+                          style={{
+                            color: msg.feedback === 'helpful' ? 'var(--td-success-color)' : 'var(--td-text-color-placeholder)',
+                            backgroundColor: msg.feedback === 'helpful' ? 'var(--td-success-color-light)' : 'transparent',
+                          }}
+                          onClick={() => submitFeedback(i, true)}
+                          disabled={!!msg.feedback}
+                          title="有帮助"
+                        >
+                          👍
+                        </button>
+                        <button
+                          className="text-sm px-1.5 py-0.5 rounded transition-colors"
+                          style={{
+                            color: msg.feedback === 'not_helpful' ? 'var(--td-danger-color)' : 'var(--td-text-color-placeholder)',
+                            backgroundColor: msg.feedback === 'not_helpful' ? 'var(--td-danger-color-light)' : 'transparent',
+                          }}
+                          onClick={() => submitFeedback(i, false)}
+                          disabled={!!msg.feedback}
+                          title="没帮助"
+                        >
+                          👎
+                        </button>
+                      </div>
                     )}
                   </div>
                 </div>

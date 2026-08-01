@@ -1,23 +1,27 @@
 import { Button } from 'tdesign-react';
-import { HomeIcon, DashboardIcon, SettingIcon } from 'tdesign-icons-react';
+import { HomeIcon, DashboardIcon, SettingIcon, BookIcon } from 'tdesign-icons-react';
 import { APP_CONFIG } from '../config';
 
 interface SidebarProps {
   isSettingsPage: boolean;
   isAdminPage: boolean;
+  isKnowledgePage: boolean;
   sidebarOpen: boolean;
   onHome: () => void;
   onOpenSettings: () => void;
   onOpenAdmin: () => void;
+  onOpenKnowledge: () => void;
 }
 
 export function Sidebar({
   isSettingsPage,
   isAdminPage,
+  isKnowledgePage,
   sidebarOpen,
   onHome,
   onOpenSettings,
   onOpenAdmin,
+  onOpenKnowledge,
 }: SidebarProps) {
   return (
     <aside
@@ -64,6 +68,15 @@ export function Sidebar({
           theme={isAdminPage ? 'primary' : 'default'}
         >
           分析记录
+        </Button>
+        <Button
+          icon={<BookIcon />}
+          onClick={onOpenKnowledge}
+          block
+          variant={isKnowledgePage ? 'base' : 'text'}
+          theme={isKnowledgePage ? 'primary' : 'default'}
+        >
+          知识库
         </Button>
       </div>
 
