@@ -7,14 +7,29 @@
 import { pipeline, env } from '@xenova/transformers';
 import { setGlobalDispatcher, ProxyAgent } from 'undici';
 
-// 为模型下载配置代理（代理软件监听 127.0.0.1:7890；若用户已开启代理则走代理下载）
-// 仅影响模型下载，不影响其他 API（DeepSeek 国内直连）
+// 模型下载代理配置：仅当用户设置了 EMBEDDING_PROXY 或本地代理端口可达时使用
+// 否则直连 HuggingFace（或用户网络的其他可达镜像），避免误伤无代理用户
 const PROXY_URL = process.env.EMBEDDING_PROXY || 'http://127.0.0.1:7890';
+let proxyEnabled = false;
 try {
-  setGlobalDispatcher(new ProxyAgent(PROXY_URL));
-  console.log(`[Embedding] 已配置下载代理: ${PROXY_URL}`);
-} catch (e) {
-  console.error('[Embedding] 代理配置失败，将尝试直连:', e?.message);
+  // 探测代理端口是否可达（200ms 超时，不阻塞启动）
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 2000);
+  await fetch(PROXY_URL, { signal: controller.signal }).catch(() => null);
+  clearTimeout(timer);
+  proxyEnabled = true;
+} catch {
+  proxyEnabled = false;
+}
+if (proxyEnabled) {
+  try {
+    setGlobalDispatcher(new ProxyAgent(PROXY_URL));
+    console.log(`[Embedding] 检测到本地代理，模型下载走: ${PROXY_URL}`);
+  } catch (e) {
+    console.error('[Embedding] 代理配置失败，将尝试直连:', e?.message);
+  }
+} else {
+  console.log('[Embedding] 未检测到本地代理，模型下载走直连');
 }
 
 // 模型下载配置（下载后缓存到 ./data/models，之后离线可用）
